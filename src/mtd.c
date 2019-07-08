@@ -54,6 +54,8 @@
 #define FUSE_NAND_SEARCH_CNT_OFFS 0xb40
 #define FUSE_NAND_SEARCH_CNT_BIT_OFFS 6
 
+void dump(const void *data, int size);
+
 unsigned int  extra_boot_stream1_pos;
 unsigned int  extra_boot_stream2_pos;
 unsigned int  extra_boot_stream_size_in_bytes;
@@ -85,6 +87,17 @@ const struct mtd_config default_mtd_config = {
 	.boot_stream_2_address = 0,
 	.secondary_boot_stream_off_in_MB = 64,
 };
+
+static inline int fcb_fingerprint()
+{
+	return plat_config_data->m_u32RomVer > 0;
+}
+
+static inline int data_randomized()
+{
+	return plat_config_data->m_u32RomVer == ROM_Version_5
+		|| plat_config_data->m_u32RomVer == ROM_Version_7;
+}
 
 static inline int multichip(struct mtd_data *md)
 {
@@ -309,7 +322,10 @@ int mtd_read_page(struct mtd_data *md, int chip, loff_t ofs, int ecc)
 
 	memset(data, 0, mtd_writesize(md) + mtd_oobsize(md));
 
-	size = mtd_writesize(md);
+	if (ecc)
+		size = mtd_writesize(md);
+	else
+		size = mtd_writesize(md) + mtd_oobsize(md);
 
 	do {
 		r = pread(md->part[chip].fd, data, size, ofs);
@@ -328,7 +344,8 @@ int mtd_read_page(struct mtd_data *md, int chip, loff_t ofs, int ecc)
 		/* swap first */
 		swap_bad_block_mark(data, oobdata, nfc_geo, 0);
 		memcpy(md->buf, oobdata, nfc_geo->metadata_size_in_bytes);
-		dst_bit_off += nfc_geo->metadata_size_in_bytes;
+
+		dst_bit_off += nfc_geo->metadata_size_in_bytes * 8;
 		oob_bit_off = dst_bit_off;
 		ecc_chunk_count = nfc_geo->ecc_chunk_count;
 
@@ -373,10 +390,7 @@ int mtd_read_page(struct mtd_data *md, int chip, loff_t ofs, int ecc)
 		return -1;
 	}
 
-	if (ecc)
-		return size;
-
-	return size + mtd_oobsize(md);
+	return size;
 }
 
 int mtd_write(struct mtd_data *md, int chip, const void *data, size_t size, loff_t ofs)
@@ -1399,7 +1413,6 @@ void *mtd_load_boot_structure(struct mtd_data *md, int chip, loff_t *ofsp, loff_
 {
 	loff_t ofs;
 	int r, stride, size;
-	NCB_BootBlockStruct_t *bbs;
 
 	stride = PAGES_PER_STRIDE * mtd_writesize(md);
 
@@ -1422,20 +1435,42 @@ void *mtd_load_boot_structure(struct mtd_data *md, int chip, loff_t *ofsp, loff_
 			fprintf(stderr, "mtd: read failed @0x%llx (%d)\n", ofs, r);
 			continue;
 		}
-		bbs = md->buf;
 
-		/* fast test */
-		if (bbs->m_u32FingerPrint1 == magic1 ||
-		    bbs->m_u32FingerPrint2 == magic2 ||
-		    bbs->m_u32FingerPrint3 == magic3)
-			break;
+		/* restore the original data */
+		if (md->randomizer)
+			for (int i = 0; i < size; ++i)
+				*(uint8_t *)(md->buf + i) ^=
+					RandData[i + (ofs / mtd_writesize(md) % 256) / 64 * RAND_16K];
 
-		if (magic_offset > 0) {
-			bbs = md->buf + magic_offset;
+		if (fcb_fingerprint()) {
+
+			BCB_ROM_BootBlockStruct_t *fcb;
+			fcb = md->buf + magic_offset;
+
+			/* fast test */
+			if (fcb->m_u32FingerPrint == magic1) {
+				break;
+			}
+
+		} else {
+
+			/* For NCB */
+			NCB_BootBlockStruct_t *bbs;
+			bbs = md->buf;
+
+			/* fast test */
 			if (bbs->m_u32FingerPrint1 == magic1 ||
 			    bbs->m_u32FingerPrint2 == magic2 ||
 			    bbs->m_u32FingerPrint3 == magic3)
 				break;
+
+			if (magic_offset > 0) {
+				bbs = md->buf + magic_offset;
+				if (bbs->m_u32FingerPrint1 == magic1 ||
+				    bbs->m_u32FingerPrint2 == magic2 ||
+				    bbs->m_u32FingerPrint3 == magic3)
+					break;
+			}
 		}
 
 		fprintf(stderr, "mtd: fingerprints mismatch @%d:0x%llx\n", chip, ofs);
@@ -1445,9 +1480,8 @@ void *mtd_load_boot_structure(struct mtd_data *md, int chip, loff_t *ofsp, loff_
 	if (ofs >= end)
 		return NULL;
 
-	// dump(bbs, sizeof(*bbs));
-
 	*ofsp = ofs;
+
 	return md->buf;
 }
 
@@ -1461,6 +1495,9 @@ int mtd_load_all_boot_structures(struct mtd_data *md)
 	BadBlockTableNand_t *bbtn;
 	struct mtd_part *mp;
 	int chip;
+	int offset;
+	void *tmp;
+	int dst_bit_off, src_bit_off;
 
 	stride = PAGES_PER_STRIDE * mtd_writesize(md);
 	search_area_sz = (1 << md->cfg.search_exponent) * stride;
@@ -1474,6 +1511,77 @@ int mtd_load_all_boot_structures(struct mtd_data *md)
 		return -1;
 	}
 
+	/* This section for i.MX50/6/7/8 family FCB and DBBT struct */
+	if (fcb_fingerprint()) {
+
+		/* calculate the offset */
+		if (plat_config_data->m_u32MiscFlags & FCB_LAY_META_12B) {
+			offset = 12;
+		} else if (plat_config_data->m_u32MiscFlags & FCB_LAY_META_32B) {
+			offset = 32;
+		} else {
+			fprintf(stderr, "mtd: FCB layout not recognized\n");
+		}
+
+		/* check if need to de-randomizer the data for FCB */
+		if (plat_config_data->m_u32MiscFlags & FCB_RAN_ENABLED)
+			md->randomizer = true;
+
+		if (multichip(md)) {
+			ofs = 0;
+			chip = i;
+		} else {
+			ofs = i * search_area_sz;
+			chip = 0;
+		}
+		end = ofs + search_area_sz;
+
+		while (ofs < end) {
+			buf = mtd_load_boot_structure(md, 0, &ofs, end,
+					FCB_FINGERPRINT,
+					FCB_FINGERPRINT,
+					FCB_FINGERPRINT,
+					0, offset);
+
+			if (buf == NULL) {
+				ofs = end;
+				break;
+			}
+
+			/* eliminate meta and ecc data */
+			dst_bit_off = 0;
+			src_bit_off = 0;
+			tmp  = malloc(mtd_writesize(md) + mtd_oobsize(md));
+			for (i = 0; i < 8; ++i) {
+				copy_bits(tmp, dst_bit_off, buf + offset,
+					  src_bit_off, 128 * 8);
+				dst_bit_off += 128 * 8;
+				src_bit_off += 128 * 8 + 62 * 13;
+			}
+
+			BCB_ROM_BootBlockStruct_t *fcb = tmp;
+
+
+			if (md->flags & F_VERBOSE)
+				printf("mtd: found FCB candidate version %x @%d:0x%llx\n",
+					 fcb->m_u32Version, chip, ofs);
+
+			ofs += stride;
+
+			/* found all valid FCB, copy to md->fcb */
+			memcpy(&md->fcb, tmp, sizeof(BCB_ROM_BootBlockStruct_t));
+			free(tmp);
+
+		}
+
+		/* turn randomizer flag off */
+		if (plat_config_data->m_u32MiscFlags & FCB_RAN_ENABLED)
+			md->randomizer = false;
+
+		/* return 0; */
+	}
+
+#if 0
 	/* NCBs are NCB1, NCB2 */
 	for (i = 0; i < 2; i++) {
 
@@ -1595,7 +1703,7 @@ int mtd_load_all_boot_structures(struct mtd_data *md)
 		md->curr_ldlb = &md->ldlb[0];
 	else
 		md->curr_ldlb = &md->ldlb[1];
-
+#endif
 	/* DBBTs are right after the LDLBs */
 	for (i = 0; i < 2; i++) {
 
@@ -1603,23 +1711,29 @@ int mtd_load_all_boot_structures(struct mtd_data *md)
 			ofs = 2 * search_area_sz;
 			chip = i;
 		} else {
-			ofs = (4 + i) * search_area_sz;
+			ofs =  search_area_sz + i * stride;
 			chip = 0;
 		}
 
+		/* fprintf(stderr, "DBBT ofs %x\n", ofs); */
 		end = ofs + search_area_sz;
 		md->curr_dbbt = NULL;
 		md->dbbt_ofs[i] = -1;
 
 		buf = mtd_load_boot_structure(md, chip, &ofs, end,
-				DBBT_FINGERPRINT1,
 				plat_config_data->m_u32DBBT_FingerPrint,
-				DBBT_FINGERPRINT3,
+				DBBT_FINGERPRINT2,
+				DBBT_FINGERPRINT2,
 				1, 0);
+
 		if (buf == NULL) {
 			fprintf(stderr, "mtd: DBBT%d not found\n", i);
 			continue;
+		} else {
+			fprintf(stderr, "mtd: DBBT%d found\n", i);
+			memcpy(&md->dbbt50, md->buf, sizeof(BCB_ROM_BootBlockStruct_t));
 		}
+
 		md->curr_dbbt = buf;
 
 		if (md->flags & F_VERBOSE)
@@ -1648,8 +1762,10 @@ int mtd_load_all_boot_structures(struct mtd_data *md)
 
 	/* no bad blocks what-so-ever */
 	if (md->curr_dbbt->DBBT_Block1.m_u32Number2KPagesBB_NAND0 == 0 &&
-	    md->curr_dbbt->DBBT_Block1.m_u32Number2KPagesBB_NAND1 == 0)
+	    md->curr_dbbt->DBBT_Block1.m_u32Number2KPagesBB_NAND1 == 0) {
+		fprintf(stderr, "no bad block found\n");
 		return 0;
+	}
 
 	/* find DBBT to read from */
 	if (md->curr_dbbt == &md->dbbt[0]) {
@@ -3114,7 +3230,7 @@ int write_extra_boot_stream(struct mtd_data *md, FILE *fp)
 }
 
 
-int write_boot_stream(struct mtd_data *md, FILE *fp)
+int write_boot_stream(struct mtd_data *md, FILE *fp, int flags)
 {
 	int startpage, start, size;
 	loff_t ofs, end;
@@ -3124,7 +3240,7 @@ int write_boot_stream(struct mtd_data *md, FILE *fp)
 
 	vp(md, "---------- Start to write the [ %s ]----\n", (char*)md->private);
 	for (i = 0; i < 2; i++) {
-		if (fp == NULL)
+		if (fp == NULL || (flags & UPDATE_BS(i)) == 0)
 			continue;
 
 		if (i == 0) {
@@ -3438,7 +3554,7 @@ int v1_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
 	write_dbbt(md, 1); /* only write the DBBT for nand0 */
 
 	/* write the boot image. */
-	return write_boot_stream(md, fp);
+	return write_boot_stream(md, fp, flags);
 }
 
 int v2_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
@@ -3669,7 +3785,7 @@ int v4_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
 	}
 
 	/* [3] Write the two boot streams. */
-	return write_boot_stream(md, fp);
+	return write_boot_stream(md, fp, flags);
 }
 
 int v5_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
@@ -3677,10 +3793,24 @@ int v5_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
 	int size, i, r, chip = 0;
 	loff_t ofs;
 	struct mtd_config *cfg = &md->cfg;
+	unsigned int boot_stream_size_in_bytes;
+
+
 
 	/* [1] Write the FCB search area. */
 	size = mtd_writesize(md) + mtd_oobsize(md);
 	memset(md->buf, 0, size);
+
+	if (flags == 0x10) {
+		/* update the FW2 size */
+		fseek(fp, 0, SEEK_END);
+		boot_stream_size_in_bytes = ftell(fp);
+		rewind(fp);
+
+		md->fcb.FCB_Block.m_u32PagesInFirmware2 =
+			(boot_stream_size_in_bytes + (mtd_writesize(md) - 1)) / mtd_writesize(md);
+	}
+
 	r = fcb_encrypt(&md->fcb, md->buf, size, 2);
 	if (r < 0)
 		return r;
@@ -3690,6 +3820,10 @@ int v5_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
 	mtd_commit_bcb(md, "FCB", 0, 0, 0, 1, size, false);
 	/* disable randomizer */
 	md->randomizer = false;
+
+	if (flags == 0x10) {
+		goto UPDATE_FW2;
+	}
 
 	/* [2] Write the DBBT search area. */
 	memset(md->buf, 0, mtd_writesize(md));
@@ -3714,8 +3848,10 @@ int v5_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
 		}
 	}
 
+UPDATE_FW2:
+
 	/* [3] Write the two boot streams. */
-	return write_boot_stream(md, fp);
+	return write_boot_stream(md, fp, flags);
 }
 
 int v6_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
@@ -3757,7 +3893,7 @@ int v6_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
 	}
 
 	/* [3] Write the two boot streams. */
-	return write_boot_stream(md, fp);
+	return write_boot_stream(md, fp, flags);
 }
 
 int v7_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
@@ -3765,6 +3901,9 @@ int v7_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
 	int err;
 
 	err = v5_rom_mtd_commit_structures(md, fp, flags);
+
+	return 0;
+
 	if (err) {
 		fprintf(stderr, "write the first part of boot stream failed");
 	}

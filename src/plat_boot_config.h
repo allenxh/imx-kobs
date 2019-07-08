@@ -49,6 +49,15 @@
 #define MX8Q	0x8
 #define MX8MQ	0x81
 
+
+/* FCB layout with leading 12B reserved and use hamming code for ecc */
+#define FCB_LAY_META_12B	(1 << 0)
+/* FCB layout with 32B meta and use BCH for ecc */
+#define FCB_LAY_META_32B	(1 << 1)
+/* FCB data was randomized */
+#define FCB_RAN_ENABLED		(1 << 2)
+
+
 typedef struct _platform_config_t {
 	uint32_t m_u32RomVer;
 	uint32_t m_u32EnDISBBM;
@@ -60,6 +69,7 @@ typedef struct _platform_config_t {
 	uint32_t m_u32Arm_type;
 	uint32_t m_u32DBBT_FingerPrint;
 	uint32_t m_u32MaxEccStrength;
+	uint32_t m_u32MiscFlags;
 	int (* rom_mtd_init)(struct mtd_data *md, FILE *fp);
 	int (* rom_mtd_commit_structures)(struct mtd_data *md, FILE *fp, int flags);
 } platform_config;

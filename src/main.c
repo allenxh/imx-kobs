@@ -392,6 +392,7 @@ static int perform_bootstream_update(struct mtd_data *md, FILE *infp, int image_
 {
 	int i, r;
 	unsigned int size, start, avail, end, update;
+	int page_size = mtd_writesize(md);
 
 	r = mtd_load_all_boot_structures(md);
 	if (r != 0) {
@@ -412,10 +413,10 @@ static int perform_bootstream_update(struct mtd_data *md, FILE *infp, int image_
 
 		/* first verify it fits */
 		if (i == 0) {
-			start = md->curr_ldlb->LDLB_Block2.m_u32Firmware_startingSector  * 2048;
-			end = md->curr_ldlb->LDLB_Block2.m_u32Firmware_startingSector2 * 2048;
+			start = md->fcb.FCB_Block.m_u32Firmware1_startingPage * page_size;
+			end = md->fcb.FCB_Block.m_u32Firmware2_startingPage * page_size;
 		} else {
-			start = md->curr_ldlb->LDLB_Block2.m_u32Firmware_startingSector2 * 2048;
+			start = md->fcb.FCB_Block.m_u32Firmware2_startingPage * page_size;
 			end = mtd_size(md);
 		}
 		avail = end - start;
@@ -427,13 +428,13 @@ static int perform_bootstream_update(struct mtd_data *md, FILE *infp, int image_
 
 		/* now update size */
 		if (i == 0)
-			md->curr_ldlb->LDLB_Block2.m_uSectorsInFirmware = (size + 2047) / 2048;
+			md->fcb.FCB_Block.m_u32PagesInFirmware1 = (size + page_size - 1) / page_size;
 		else
-			md->curr_ldlb->LDLB_Block2.m_uSectorsInFirmware2 = (size + 2047) / 2048;
+			md->fcb.FCB_Block.m_u32PagesInFirmware2 = (size + page_size - 1) / page_size;
 		update |= UPDATE_BS(i);
 	}
 
-	r = plat_config_data->rom_mtd_commit_structures(md, infp, UPDATE_LDLB | update);
+	r = plat_config_data->rom_mtd_commit_structures(md, infp, update);
 	if (r < 0) {
 		fprintf(stderr, "FAILED to commit structures\n");
 		return -1;
