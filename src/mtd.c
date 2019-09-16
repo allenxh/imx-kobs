@@ -96,7 +96,8 @@ static inline int fcb_fingerprint()
 static inline int data_randomized()
 {
 	return plat_config_data->m_u32RomVer == ROM_Version_5
-		|| plat_config_data->m_u32RomVer == ROM_Version_7;
+		|| plat_config_data->m_u32RomVer == ROM_Version_7
+		|| plat_config_data->m_u32RomVer == ROM_Version_8;
 }
 
 static inline int multichip(struct mtd_data *md)
@@ -1835,12 +1836,12 @@ int mtd_load_all_boot_structures(struct mtd_data *md)
 
 static inline int need_extra_boot_stream()
 {
-	return plat_config_data->m_u32RomVer == ROM_Version_6;
+	return plat_config_data->m_u32RomVer == ROM_Version_7;
 }
 
 static inline int fixed_secondary_boot_strem()
 {
-	return plat_config_data->m_u32RomVer == ROM_Version_7;
+	return plat_config_data->m_u32RomVer == ROM_Version_8;
 }
 
 /* single chip version */
@@ -2032,6 +2033,7 @@ int mtd_dump_structure(struct mtd_data *md)
 	case ROM_Version_5:
 	case ROM_Version_6:
 	case ROM_Version_7:
+	case ROM_Version_8:
 #undef P3
 #define P3(x)	printf("  %s = 0x%08x\n", #x, md->fcb.x)
 		printf("FCB\n");
@@ -3859,15 +3861,31 @@ int v6_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
 	int size, i, r, chip = 0;
 	loff_t ofs;
 	struct mtd_config *cfg = &md->cfg;
+	unsigned int boot_stream_size_in_bytes;
 
 	/* [1] Write the FCB search area. */
 	size = mtd_writesize(md) + mtd_oobsize(md);
 	memset(md->buf, 0, size);
+
+	if (flags == 0x10) {
+		/* update the FW2 size */
+		fseek(fp, 0, SEEK_END);
+		boot_stream_size_in_bytes = ftell(fp);
+		rewind(fp);
+
+		md->fcb.FCB_Block.m_u32PagesInFirmware2 =
+			(boot_stream_size_in_bytes + (mtd_writesize(md) - 1)) / mtd_writesize(md);
+	}
+
 	r = fcb_encrypt(&md->fcb, md->buf, size, 3);
 	if (r < 0)
 		return r;
 
 	mtd_commit_bcb(md, "FCB", 0, 0, 0, 1, size, false);
+
+	if (flags == 0x10) {
+		goto UPDATE_FW2;
+	}
 
 	/* [2] Write the DBBT search area. */
 	memset(md->buf, 0, mtd_writesize(md));
@@ -3891,6 +3909,8 @@ int v6_rom_mtd_commit_structures(struct mtd_data *md, FILE *fp, int flags)
 			}
 		}
 	}
+
+UPDATE_FW2:
 
 	/* [3] Write the two boot streams. */
 	return write_boot_stream(md, fp, flags);

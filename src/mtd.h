@@ -227,9 +227,10 @@ enum {
 	ROM_Version_2       =  2, /* e.g., i.MX53 */
 	ROM_Version_3	    =  3, /* e.g., i.MX50, iMX6dqsl */
 	ROM_Version_4	    =  4, /* e.g., i.MX6sx */
-	ROM_Version_5	    =  5, /* e.g., i.MX6sx TO1.2*/
-	ROM_Version_6	    =  6, /* e.g., i.MX8MQ*/
-	ROM_Version_7	    =  7, /* e.g., i.MX8Q*/
+	ROM_Version_5	    =  5, /* e.g., i.MX6sx TO1.2/7d*/
+	ROM_Version_6	    =  6, /* e.g., i.MX6ul/6ull*/
+	ROM_Version_7	    =  7, /* e.g., i.MX8MQ*/
+	ROM_Version_8	    =  8, /* e.g., i.MX8Q*/
 };
 
 static inline int mtd_pages_per_block(struct mtd_data *md)

@@ -443,6 +443,35 @@ static int perform_bootstream_update(struct mtd_data *md, FILE *infp, int image_
 	return 0;
 }
 
+static char *tmp_file = ".tmp_kobs_ng";
+static char *padding_1k_in_head(char *file_name)
+{
+	int to, from;
+	int ret;
+	int sz = getpagesize();
+
+	from = open(file_name, O_RDONLY, S_IRUSR | S_IWUSR);
+	to = open(tmp_file, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+	if (from < 0 || to < 0) {
+		fprintf(stderr, "unable to create a temporary file\n");
+		exit(5);
+	}
+
+	/* Padding 1k in the head. */
+	lseek(to, 1024, SEEK_SET);
+
+	do {
+		/* copy a page each time. */
+		ret = sendfile(to, from, NULL, sz);
+	} while (ret > 0);
+
+	close(to);
+	close(from);
+
+	/* change to the temporary file. */
+	return tmp_file;
+}
+
 int update_main(int argc, char **argv)
 {
 	int i, j, r;
@@ -456,6 +485,7 @@ int update_main(int argc, char **argv)
 	char ascii[20 * 2 + 1];
 	int device_key;
 	uint8_t *keyp;
+	int padding = 0;
 
 	memset(key, 0, sizeof(key));
 	device_key = 0;
@@ -490,6 +520,9 @@ int update_main(int argc, char **argv)
 			case 'd':
 				device_key = 1;	/* use device key */
 				break;
+			case 'x':
+				padding = 1;
+				break;
 			case 'z':
 				memset(key, 0, sizeof(key));
 				break;
@@ -511,6 +544,13 @@ int update_main(int argc, char **argv)
 
 	if (flags & F_VERBOSE)
 		mtd_cfg_dump(&cfg);
+
+	if (padding) {
+		infile = padding_1k_in_head(infile);
+
+		if (flags & F_VERBOSE)
+			printf("\t -- We add the 1k-padding to the uboot.\n");
+	}
 
 	infp = fopen(infile, "rb");
 	if (infp == NULL) {
@@ -555,35 +595,6 @@ int update_main(int argc, char **argv)
 	fclose(infp);
 
 	return 0;
-}
-
-static char *tmp_file = ".tmp_kobs_ng";
-static char *padding_1k_in_head(char *file_name)
-{
-	int to, from;
-	int ret;
-	int sz = getpagesize();
-
-	from = open(file_name, O_RDONLY, S_IRUSR | S_IWUSR);
-	to = open(tmp_file, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
-	if (from < 0 || to < 0) {
-		fprintf(stderr, "unable to create a temporary file\n");
-		exit(5);
-	}
-
-	/* Padding 1k in the head. */
-	lseek(to, 1024, SEEK_SET);
-
-	do {
-		/* copy a page each time. */
-		ret = sendfile(to, from, NULL, sz);
-	} while (ret > 0);
-
-	close(to);
-	close(from);
-
-	/* change to the temporary file. */
-	return tmp_file;
 }
 
 int init_main(int argc, char **argv)

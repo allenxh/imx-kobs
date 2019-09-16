@@ -175,7 +175,7 @@ static platform_config mx6ul_boot_config = {
 };
 
 static platform_config mx8mq_boot_config = {
-	.m_u32RomVer = ROM_Version_6,
+	.m_u32RomVer = ROM_Version_7,
 	.m_u32EnDISBBM = 0,
 	.m_u32EnBootStreamVerify = 0,
 	.m_u32UseNfcGeo = 0,
@@ -190,7 +190,7 @@ static platform_config mx8mq_boot_config = {
 };
 
 static platform_config mx8q_boot_config = {
-	.m_u32RomVer = ROM_Version_7,
+	.m_u32RomVer = ROM_Version_8,
 	.m_u32EnDISBBM = 0,
 	.m_u32EnBootStreamVerify = 0,
 	.m_u32UseNfcGeo = 0,
